@@ -1,0 +1,11 @@
+{
+  "name": "opencode-llm-router",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Tiered LLM router plugin for OpenCode: free (Token Harbor) -> subscription (OpenCode Go) -> api (OpenRouter/Azure)",
+  "type": "module",
+  "scripts": {
+    "test": "node --experimental-strip-types --test llm-router.test.js"
+  },
+  "license": "MIT"
+}
