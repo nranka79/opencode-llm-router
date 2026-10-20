@@ -3,7 +3,7 @@
 
 import { describe, it, beforeEach } from "node:test"
 import assert from "node:assert"
-import { routeChat, resetForTests } from "./llm-router.ts"
+import { routeChat, resetForTests } from "./llm-router-core.ts"
 
 const ENV_KEYS = [
   "TOKENHARBOR_API_KEY", "TOKENHARBOR_API_KEY_2",
