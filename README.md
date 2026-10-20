@@ -1,39 +1,43 @@
 # opencode-llm-router
 
-A tiered LLM router plugin for [OpenCode](https://opencode.ai). It makes an
-`llm-router` auth provider available to the OpenCode / Anti-Gravity extension.
-Whenever the extension asks for an LLM, this plugin wraps the request and calls
-the local LLM gateway routing order:
+An [OpenCode](https://opencode.ai) plugin that makes an `llm-router` auth
+provider available to the OpenCode / Anti-Gravity extension. Whenever the
+extension asks for an LLM through that provider, this plugin forwards the
+request to the AI Model Gateway — `https://llm.ahfl.in/v1`, the same
+first-party service Hermes and every other caller use — and relays the
+response back exactly as received.
 
-| Tier | Backing | Keys | Model |
-|---|---|---|---|
-| 1. free | Token Harbor | `TOKENHARBOR_API_KEY[,_2,_3,...]` | `deepseek-v4-flash:free` |
-| 2. subscription | OpenCode Go (round-robin) | `OPENCODE_GO_KEY_1..5` | `deepseek-v4-flash` |
-| 3. api (paid) | OpenRouter → Token Harbor paid → Azure OpenAI | `OPENROUTER_API_KEY[...]`, `AZURE_*` | `deepseek/deepseek-chat` |
+**This plugin does not decide anything.** It used to run its own free ->
+subscription -> paid fallback locally, with its own keys for Token Harbor,
+OpenCode Go, OpenRouter and Azure. That has moved to the gateway, which
+already implements the same tiering — one place that decision is made, kept
+current, instead of a second copy here that could drift from it. The request
+sent is whatever the AI SDK built, byte for byte (including `model` — this
+provider's one configured model, `auto`, is a real model id the gateway
+understands as "no preference, you choose, currently
+`deepseek-v4-flash`" — see `llm-router-core.ts` for the model name and the
+gateway's own `_requested_model` for where that convention lives).
 
-A tier is skipped entirely when it has zero usable keys. Within a tier, entries
-are tried round-robin and any entry that `401/402/403/429/5xx`'s is skipped in
-favor of the next one, then the next tier.
+## The one credential this needs
 
-## Why keys live in `.env` (never in git)
-
-The router reads all credentials from environment variables. A convenient local
-`.env` file is auto-loaded at plugin startup from the working directory or from
-next to `llm-router-core.ts` (i.e. `~/.config/opencode/.env`, not inside
-`plugins/`). `.env` is listed in `.gitignore` and must never be committed.
-
-To set up your keys:
+A static API key issued at **https://admin.ahfl.in/gateway-keys** — distinct
+from `/keys-admin`, which manages the OUTBOUND keys the gateway itself spends
+on upstream providers; this is an INBOUND key that lets a third-party caller
+like this plugin reach the gateway at all. Shown once at issue time.
 
 ```powershell
 Copy-Item .env.example .env
-# edit .env, paste your real keys, save
+# edit .env, paste LLM_GATEWAY_API_KEY=<the key you were shown>, save
 ```
 
-Or set them as user environment variables:
+Or set it as a user environment variable instead:
 
 ```powershell
-[Environment]::SetEnvironmentVariable("OPENCODE_GO_KEY_5", "sk-your-key", "User")
+[Environment]::SetEnvironmentVariable("LLM_GATEWAY_API_KEY", "sk-gw-your-key", "User")
 ```
+
+If you see `LLM_GATEWAY_API_KEY is not set` in a chat error, that's this —
+nothing else needs configuring.
 
 ## Installation
 
@@ -64,8 +68,9 @@ Copy-Item llm-router-core.ts "$env:USERPROFILE\.config\opencode\llm-router-core.
 Copy-Item llm-router.ts "$env:USERPROFILE\.config\opencode\plugins\llm-router.ts"
 ```
 
-Then in OpenCode pick the `llm-router` provider with any dummy API key — the real
-keys come from `.env` / env vars.
+Then in OpenCode pick the `llm-router` provider with any dummy API key for its
+own auth prompt — it's never used; the real credential is `LLM_GATEWAY_API_KEY`
+from `.env` / env vars.
 
 ## Tests
 

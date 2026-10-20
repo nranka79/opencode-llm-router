@@ -1,19 +1,17 @@
 import type { Plugin } from "@opencode-ai/plugin"
 
-// Tiered LLM router — mirrors the Hermes VPS llm-gateway routing order:
-//   1. free          — Token Harbor free deepseek-v4-flash (TOKENHARBOR_API_KEY[,_2,_3,...])
-//   2. subscription  — OpenCode Go keys, round-robin (OPENCODE_GO_KEY_1..5)
-//   3. api (paid)    — OpenRouter, then Token Harbor paid, then Azure OpenAI (if configured)
+// LLM router — a thin pass-through to the AI Model Gateway (the Hermes VPS
+// service at https://llm.ahfl.in/v1). This plugin does NOT decide which
+// provider or pricing tier serves a request; the gateway already does that
+// (free -> subscription -> paid, per model), and is the one place that
+// decision is made for every caller, not just this one. This plugin's only
+// job is forwarding opencode's request there, authenticated with a static
+// key, and relaying the response back unchanged. See llm-router-core.ts.
 //
-// A tier is skipped entirely when it has zero usable keys. Within a tier,
-// entries are tried in round-robin order (persisted across calls) and any
-// entry that 401/402/403/429/5xx's is skipped in favor of the next one, then
-// the next tier. Azure uses `api-key` header instead of `Authorization: Bearer`.
-//
-// Keys are never hardcoded. They are read from environment variables, with an
-// optional local `.env` file next to llm-router-core.ts (or in the working
-// directory) as a convenient place to keep them. `.env` is gitignored — never
-// commit keys.
+// Keys are never hardcoded. LLM_GATEWAY_API_KEY is read from an environment
+// variable, with an optional local `.env` file next to llm-router-core.ts
+// (or in the working directory) as a convenient place to keep it. `.env` is
+// gitignored — never commit it.
 //
 // IMPORTANT — deploy layout: this file is what opencode actually loads from
 // its plugins directory, and it must export NOTHING except `LlmRouterPlugin`.
@@ -25,7 +23,7 @@ import type { Plugin } from "@opencode-ai/plugin"
 // llm-router-core.ts inside plugins/ made opencode call its exported
 // nodeFetch() with bogus args at bootstrap, and an uncaught rejection there
 // corrupted opencode's whole plugin/event system for the rest of the
-// process (broke every provider, not just this one). See SETUP.md.
+// process (broke every provider, not just this one). See README.md.
 
 import { routeChat, nodeFetch } from "../llm-router-core.ts"
 

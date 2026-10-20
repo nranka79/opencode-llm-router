@@ -5,12 +5,12 @@
 // the plugins directory and, for exports whose shape matches a fetch-style
 // transport, invokes them directly as part of its own bootstrap self-test —
 // bypassing whatever try/catch wrapping exists inside the real auth.loader
-// closure entirely. Our test suite needs `routeChat`/`resetForTests` as
-// named exports, but opencode must never see them: if it does, it calls
-// `routeChat(body, init)` itself with only 2 args (no fetch impl), which
-// throws, and an uncaught throw during that bootstrap probe corrupts
-// opencode's whole plugin/event system for the rest of the process — not
-// just this provider (confirmed by testing on 2026-09-18/19).
+// closure entirely. Our test suite needs `routeChat` as a named export, but
+// opencode must never see them: if it does, it calls `routeChat(body, init)`
+// itself with only 2 args (no fetch impl), which throws, and an uncaught
+// throw during that bootstrap probe corrupts opencode's whole plugin/event
+// system for the rest of the process — not just this provider (confirmed by
+// testing on 2026-09-18/19).
 //
 // So: this file holds the real logic and IS exported for `node --test`.
 // llm-router.ts (the file actually deployed into opencode's plugins dir)
@@ -122,159 +122,69 @@ function loadDotEnv(): void {
 
 loadDotEnv()
 
-type Entry = {
-  id: string
-  base: string // chat/completions endpoint base, no trailing slash
-  key: string
-  model: string
-  authHeader?: "bearer" | "api-key"
-}
-
-let freeIndex = 0
-let subIndex = 0
-let apiIndex = 0
-
-const DEAD_STATUSES = new Set([401, 402, 403, 429])
-
-// Test-only: reset round-robin indices between test cases.
-export function resetForTests(): void {
-  freeIndex = 0
-  subIndex = 0
-  apiIndex = 0
-}
-
 function env(name: string): string {
   return (process.env[name] || "").trim()
 }
 
-// base env is entry 1; base_2, base_3, ... follow until first unset.
-function envSeries(base: string, max = 8): string[] {
-  const out: string[] = []
-  const first = env(base)
-  if (first) out.push(first)
-  for (let i = 2; i <= max; i++) {
-    const v = env(`${base}_${i}`)
-    if (!v) break
-    out.push(v)
-  }
-  return out
-}
-
-function buildPools() {
-  const freeKeys = envSeries("TOKENHARBOR_API_KEY")
-  const freePool: Entry[] = freeKeys.map((k, i) => ({
-    id: `tokenharbor-free-${i}`,
-    base: "https://tokenharbor.ai/v1",
-    key: k,
-    model: "deepseek-v4-flash:free",
-  }))
-
-  const goKeys = [
-    env("OPENCODE_GO_KEY_1"),
-    env("OPENCODE_GO_KEY_2"),
-    env("OPENCODE_GO_KEY_3"),
-    env("OPENCODE_GO_KEY_4"),
-    env("OPENCODE_GO_KEY_5"),
-  ].filter(Boolean)
-  const subscriptionPool: Entry[] = goKeys.map((k, i) => ({
-    id: `opencode-go-${i}`,
-    base: "https://opencode.ai/zen/go/v1",
-    key: k,
-    model: "deepseek-v4-flash",
-  }))
-
-  const orKeys = envSeries("OPENROUTER_API_KEY")
-  const orModel = env("OPENROUTER_MODEL") || "deepseek/deepseek-chat"
-  const apiPool: Entry[] = orKeys.map((k, i) => ({
-    id: `openrouter-${i}`,
-    base: "https://openrouter.ai/api/v1",
-    key: k,
-    model: orModel,
-  }))
-  if (freeKeys.length) {
-    apiPool.push({
-      id: "tokenharbor-paid",
-      base: "https://tokenharbor.ai/v1",
-      key: freeKeys[0],
-      model: "deepseek-v4-flash",
-    })
-  }
-  const azKey = env("AZURE_OPENAI_API_KEY")
-  const azEndpoint = env("AZURE_OPENAI_ENDPOINT")
-  const azDeployment = env("AZURE_OPENAI_DEPLOYMENT")
-  const azApiVersion = env("AZURE_OPENAI_API_VERSION") || "2024-08-01-preview"
-  if (azKey && azEndpoint && azDeployment) {
-    apiPool.push({
-      id: "azure",
-      base: `${azEndpoint.replace(/\/$/, "")}/openai/deployments/${azDeployment}?api-version=${azApiVersion}`,
-      key: azKey,
-      model: "deepseek-v4-flash",
-      authHeader: "api-key",
-    })
-  }
-
-  return { freePool, subscriptionPool, apiPool }
-}
-
+// ---------------------------------------------------------------------------
+// This plugin is a thin forward-and-relay, nothing more.
+//
+// It used to run its OWN free -> subscription -> api fallback locally, with
+// its own keys for Token Harbor / OpenCode Go / OpenRouter / Azure. That
+// duplicated — and could drift from — the exact same tiering logic already
+// implemented, and kept current, on the AI Model Gateway (the Hermes VPS
+// service at https://llm.ahfl.in/v1, source: `vps 2 residential tunnel/
+// llm-gateway/server.py`). There is now exactly one place that decides which
+// provider/bucket serves a request: the gateway. This plugin's only job is
+// to get opencode's request there and relay whatever comes back, unchanged.
+//
+// Concretely: forward the body exactly as the AI SDK sent it — including
+// `model` (opencode.jsonc configures this provider's one model as "auto",
+// which the gateway already treats as "no preference, you decide, currently
+// defaults to deepseek-v4-flash" — see `_requested_model` / DEFAULT_MODEL in
+// server.py) and `stream` — to POST /v1/chat/completions, authenticated with
+// a static key issued at admin.ahfl.in/gateway-keys (LLM_GATEWAY_API_KEY).
+// That endpoint is the SAME one Hermes and every other first-party caller
+// already use; nothing here is a second, parallel integration.
+//
+// A non-2xx response FROM THE GATEWAY (it has already tried every tier and
+// given up) is relayed to the AI SDK exactly as received — the gateway's own
+// error body is already OpenAI-shaped. Only a genuine failure to reach the
+// gateway at all (DNS, TLS, connection refused) is caught and turned into a
+// synthetic error here, because in that case there is no real response to
+// relay.
 export async function routeChat(
   rawBody: Record<string, unknown>,
   init: RequestInit | undefined,
   doFetch: (url: string, init?: RequestInit) => Promise<Response>,
 ): Promise<Response> {
-  const { freePool, subscriptionPool, apiPool } = buildPools()
-
-  const tiers: { name: string; pool: Entry[]; next: () => number }[] = [
-    { name: "free", pool: freePool, next: () => freeIndex++ },
-    { name: "subscription", pool: subscriptionPool, next: () => subIndex++ },
-    { name: "api", pool: apiPool, next: () => apiIndex++ },
-  ]
-
-  let lastStatus = 503
-  let lastDetail = "no LLM keys configured in any tier"
-
-  for (const tier of tiers) {
-    const n = tier.pool.length
-    if (n === 0) continue
-
-    const start = tier.next() % n
-    for (let i = 0; i < n; i++) {
-      const entry = tier.pool[(start + i) % n]
-      const headers = new Headers(init?.headers)
-      if (entry.authHeader === "api-key") {
-        headers.delete("Authorization")
-        headers.set("api-key", entry.key)
-      } else {
-        headers.set("Authorization", `Bearer ${entry.key}`)
-      }
-      const payload = { ...rawBody, model: entry.model }
-      const out = JSON.stringify(payload)
-      headers.set("Content-Length", String(out.length))
-      headers.set("Content-Type", "application/json")
-
-      let res: Response
-      try {
-        res = await doFetch(`${entry.base.replace(/\/$/, "")}/chat/completions`, {
-          ...init,
-          method: "POST",
-          headers,
-          body: out,
-        })
-      } catch (e) {
-        lastStatus = 502
-        lastDetail = `${entry.id}: ${e}`
-        continue
-      }
-
-      if (DEAD_STATUSES.has(res.status) || res.status >= 500) {
-        lastStatus = res.status
-        lastDetail = `${entry.id}: HTTP ${res.status}`
-        continue
-      }
-      return res
-    }
+  const apiKey = env("LLM_GATEWAY_API_KEY")
+  if (!apiKey) {
+    throw Object.assign(
+      new Error(
+        "LLM_GATEWAY_API_KEY is not set. Issue one at https://admin.ahfl.in/gateway-keys and put it in .env — see .env.example.",
+      ),
+      { status: 500 },
+    )
   }
+  const base = (env("LLM_GATEWAY_BASE_URL") || "https://llm.ahfl.in/v1").replace(/\/$/, "")
 
-  throw Object.assign(new Error(`All LLM router tiers exhausted: ${lastDetail}`), {
-    status: lastStatus,
-  })
+  const headers = new Headers(init?.headers)
+  headers.set("Authorization", `Bearer ${apiKey}`)
+  headers.set("Content-Type", "application/json")
+  const out = JSON.stringify(rawBody)
+  headers.set("Content-Length", String(Buffer.byteLength(out)))
+
+  let res: Response
+  try {
+    res = await doFetch(`${base}/chat/completions`, {
+      ...init,
+      method: "POST",
+      headers,
+      body: out,
+    })
+  } catch (e) {
+    throw Object.assign(new Error(`AI Model Gateway unreachable at ${base}: ${e}`), { status: 502 })
+  }
+  return res
 }
