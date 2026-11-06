@@ -19,8 +19,13 @@
 import { readFileSync, existsSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 import { dirname, join } from "node:path"
+import { randomUUID } from "node:crypto"
 import * as http from "node:http"
 import * as https from "node:https"
+
+// One metering session per opencode process. The AI SDK does not expose a
+// conversation id to this transport, so this groups the process's calls.
+const PLUGIN_SESSION_ID = `opencode-${randomUUID()}`
 
 // opencode's plugin sandbox does NOT expose a working `globalThis.fetch` at
 // the point it invokes a provider's custom auth transport (confirmed by
@@ -172,6 +177,17 @@ export async function routeChat(
   const headers = new Headers(init?.headers)
   headers.set("Authorization", `Bearer ${apiKey}`)
   headers.set("Content-Type", "application/json")
+  // Usage-metering identity. The gateway records "unknown" when these are
+  // absent; set LLM_GATEWAY_USER_ID / LLM_GATEWAY_USER_LABEL in .env.
+  headers.set("X-Hermes-Client", "opencode")
+  headers.set("X-Hermes-Platform", "opencode")
+  const userId = env("LLM_GATEWAY_USER_ID")
+  const userLabel = env("LLM_GATEWAY_USER_LABEL")
+  if (userId) headers.set("X-Hermes-User-Id", userId)
+  if (userLabel) headers.set("X-Hermes-User-Label", userLabel)
+  const bodySession = typeof rawBody.session_id === "string" ? rawBody.session_id : ""
+  const incomingSession = new Headers(init?.headers).get("x-opencode-session") || ""
+  headers.set("X-Hermes-Session-Id", bodySession || incomingSession || PLUGIN_SESSION_ID)
   const out = JSON.stringify(rawBody)
   headers.set("Content-Length", String(Buffer.byteLength(out)))
 
